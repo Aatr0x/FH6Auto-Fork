@@ -27,7 +27,7 @@ import pyautogui
 import pydirectinput
 import requests
 from pynput import keyboard
-from PIL import Image
+from PIL import Image, ImageGrab
 import win32gui
 import pickle
 
@@ -56,7 +56,7 @@ LOG_FILE = os.path.join(APP_DIR, "bot_log.txt")
 CACHE_DIR = os.path.join(APP_DIR, "cache")
 TEMPLATE_CACHE_FILE = os.path.join(CACHE_DIR, "template_cache.pkl")
 TEMPLATE_META_FILE = os.path.join(CACHE_DIR, "template_meta.json")
-CURRENT_VERSION = "1.1.0"
+CURRENT_VERSION = "1.1.2"
 
 def auto_extract_images(folder_name="images"):
     internal_dir = os.path.join(INTERNAL_DIR, folder_name)
@@ -352,10 +352,9 @@ class FH_UltimateBot(ctk.CTk):
         self.update_idletasks()
         w = self.winfo_width()
         h = self.winfo_height()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
+        gx, gy, gw, gh = self.regions["全界面"]
+        x = gx + (gw - w) // 2
+        y = gy + (gh - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
     def sync_buy_to_sell(self, event=None):
         try:
@@ -437,12 +436,91 @@ class FH_UltimateBot(ctk.CTk):
         self.config["chk_4"] = self.var_chk4.get()
         self.config["auto_restart"] = self.var_auto_restart.get()
         self.config["restart_cmd"] = self.le_restart_cmd.get().strip()
-
+        try:
+            if hasattr(self, "entry_calc_a"):
+                self.config["calc_a"] = self.entry_calc_a.get().strip()
+                self.config["calc_b"] = self.entry_calc_b.get().strip()
+                self.config["calc_c"] = self.entry_calc_c.get().strip()
+        except Exception:
+            pass
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception:
             pass
+
+    def auto_calculate_pipeline(self):
+        val_a = self.entry_calc_a.get().strip()
+        if not val_a:
+            self.log("未输入CR，无需计算。")
+            return
+            
+        try:
+            target_cr = int(val_a)
+            val_b = self.entry_calc_b.get().strip()
+            cost_per_car = int(val_b) if val_b else 81700
+            
+            val_c = self.entry_calc_c.get().strip()
+            sp_per_car = int(val_c) if val_c else 30
+        except Exception:
+            self.log("输入格式有误，请确保只输入数字！")
+            return
+
+        if cost_per_car <= 0 or sp_per_car <= 0:
+            self.log("单车成本或技能点不能为 0！")
+            return
+
+        # 1. 基础转换（总车数 & 总跑图数）
+        total_cars = target_cr // cost_per_car
+        total_races = (total_cars * sp_per_car) // 10
+
+        if total_races <= 0:
+            self.log(f"目标金额不足(只够买{total_cars}辆车)，无法产生有效跑图！")
+            return
+
+        # 2. 核心分配逻辑
+        if total_races <= 99:
+            final_loops = 1
+            final_races_per_loop = total_races
+        else:
+            import math
+            loops = math.ceil(total_races / 99)
+            avg_races = total_races // loops
+
+            # 如果平均下来大于等于70次，就采用均分策略
+            if avg_races >= 70:
+                final_loops = loops
+                final_races_per_loop = avg_races
+            # 小于70次，直接拉满每个99，舍弃最后不够塞满一轮的余数
+            else:
+                final_races_per_loop = 99
+                final_loops = total_races // 99 
+
+        # 3. 反推每一轮买车、抽奖、卖车的具体数量
+        cars_per_loop = (final_races_per_loop * 10) // sp_per_car
+
+        if final_loops <= 0:
+            self.log("计算后可用大循环次数为0。")
+            return
+
+        # 4. 自动填写到界面
+        self.entry_race.delete(0, "end")
+        self.entry_race.insert(0, str(final_races_per_loop))
+        
+        self.entry_car.delete(0, "end")
+        self.entry_car.insert(0, str(cars_per_loop))
+        
+        self.entry_cj.delete(0, "end")
+        self.entry_cj.insert(0, str(cars_per_loop))
+        
+        self.entry_sc.delete(0, "end")
+        self.entry_sc.insert(0, str(cars_per_loop))
+        
+        self.entry_global_loop.delete(0, "end")
+        self.entry_global_loop.insert(0, str(final_loops))
+
+        self.log(f"✅计算完成: 总计需{total_cars}车, 共跑图{total_races}次。分配为: {final_loops} 个大循环, 每轮跑图 {final_races_per_loop} 次, 动作 {cars_per_loop} 辆。")
+        self.save_config()
 
     # ==========================================
     # --- UI 布局设计 ---
@@ -659,9 +737,11 @@ class FH_UltimateBot(ctk.CTk):
         self.next_frame4, self.entry_next4, self.chk4 = create_next_step(
             self.config_frame, self.var_chk4, self.config.get("next_4", 1)
         )
-        # ====== 抽离到底部的全局设置栏 ======
-        self.global_settings_frame = ctk.CTkFrame(self.top_container, fg_color="#2B2B2B", height=45, corner_radius=10)
-        self.global_settings_frame.pack(fill="x", pady=(15, 0))
+                # ====== 抽离到底部的全局设置栏 (放在上方) ======
+        # 【修改1】把 self.top_container 改成了 self
+        self.global_settings_frame = ctk.CTkFrame(self, fg_color="#2B2B2B", height=45, corner_radius=10)
+        # 【修改2】加上了 padx=18，让它和上下边缘对齐
+        self.global_settings_frame.pack(fill="x", padx=18, pady=(15, 0))
         self.global_settings_frame.pack_propagate(False)
         ctk.CTkLabel(
             self.global_settings_frame, 
@@ -680,6 +760,54 @@ class FH_UltimateBot(ctk.CTk):
         self.le_restart_cmd = ctk.CTkEntry(self.global_settings_frame, width=250, height=28)
         self.le_restart_cmd.insert(0, self.config.get("restart_cmd", "start steam://run/2483190"))
         self.le_restart_cmd.pack(side="left", padx=(0, 20))
+
+
+        # ====== 新增：智能计算分配工具栏 (放在下方) ======
+        # 【修改1】把 self.top_container 改成了 self
+        self.calc_frame = ctk.CTkFrame(self, fg_color="#2B2B2B", height=45, corner_radius=10)
+        # 【修改2】加上了 padx=18，让它和上下边缘对齐
+        self.calc_frame.pack(fill="x", padx=18, pady=(10, 0))
+        self.calc_frame.pack_propagate(False)
+        ctk.CTkLabel(
+            self.calc_frame, 
+            text="次数计算器", 
+            font=ctk.CTkFont(weight="bold", size=15), 
+            text_color="#2EA043"
+        ).pack(side="left", padx=(15, 20))
+        ctk.CTkLabel(self.calc_frame, text="CR:").pack(side="left", padx=(0, 5))
+        self.entry_calc_a = ctk.CTkEntry(self.calc_frame, width=110, height=28, placeholder_text="留空不计算")
+        self.entry_calc_a.insert(0, self.config.get("calc_a", ""))
+        self.entry_calc_a.pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(self.calc_frame, text="单车成本(CR):").pack(side="left", padx=(0, 5))
+        self.entry_calc_b = ctk.CTkEntry(self.calc_frame, width=70, height=28)
+        self.entry_calc_b.insert(0, self.config.get("calc_b", "81700"))
+        self.entry_calc_b.pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(self.calc_frame, text="单车技能点:").pack(side="left", padx=(0, 5))
+        self.entry_calc_c = ctk.CTkEntry(self.calc_frame, width=50, height=28)
+        self.entry_calc_c.insert(0, self.config.get("calc_c", "30"))
+        self.entry_calc_c.pack(side="left", padx=(0, 15))
+        ctk.CTkButton(
+            self.calc_frame,
+            text="计算并应用",
+            width=90,
+            height=28,
+            fg_color="#D35400",
+            hover_color="#A04000",
+            command=self.auto_calculate_pipeline
+        ).pack(side="left", padx=(0, 15))
+        
+        # 动态限制输入框长度（只允许数字并截断）
+        def limit_len(evt, widget, max_l):
+            val = "".join(c for c in widget.get() if c.isdigit())
+            if len(val) > max_l:
+                val = val[:max_l]
+            if widget.get() != val:
+                widget.delete(0, "end")
+                widget.insert(0, val)
+        self.entry_calc_a.bind("<KeyRelease>", lambda e: limit_len(e, self.entry_calc_a, 10))
+        self.entry_calc_b.bind("<KeyRelease>", lambda e: limit_len(e, self.entry_calc_b, 7))
+        self.entry_calc_c.bind("<KeyRelease>", lambda e: limit_len(e, self.entry_calc_c, 2))
+        # ==========================================
         #ctk.CTkLabel(self.global_settings_frame, text="图片原宽（不要修改）:").pack(side="left", padx=(10, 5))
         #self.entry_base_w = ctk.CTkEntry(self.global_settings_frame, width=70, height=28, justify="center")
         #self.entry_base_w.insert(0, str(self.config.get("base_width", 2560)))
@@ -693,34 +821,39 @@ class FH_UltimateBot(ctk.CTk):
         if not self.entry_sc.get().strip():
             self.entry_sc.insert(0, "30")
 
-        self.running_frame = ctk.CTkFrame(self.top_container, fg_color="#1E1E1E", corner_radius=10, height=10)
-        self.running_frame.pack_propagate(False)
+        # === 全新的横向迷你UI设计 ===
+        self.mini_frame = ctk.CTkFrame(self, fg_color="#1E1E1E", corner_radius=10)
 
-        self.lbl_prog_race = ctk.CTkLabel(self.running_frame, text="跑图进度: 0 / 0", font=ctk.CTkFont(size=16, weight="bold"))
-        self.lbl_prog_race.pack(pady=(12, 2))
+        # 1. 日志区 (最左侧，占据主要伸缩空间)
+        self.mini_log_box = ctk.CTkTextbox(self.mini_frame, state="disabled", wrap="word", font=ctk.CTkFont(size=13), fg_color="#2B2B2B")
+        self.mini_log_box.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=10)
 
-        self.lbl_prog_buy = ctk.CTkLabel(self.running_frame, text="买车进度: 0 / 0", font=ctk.CTkFont(size=16, weight="bold"))
-        self.lbl_prog_buy.pack(pady=2)
+        # 2. 信息区 (垂直排列任务状态和耗时)
+        self.mini_info_frame = ctk.CTkFrame(self.mini_frame, fg_color="transparent")
+        self.mini_info_frame.pack(side="left", fill="y", padx=5, pady=10)
 
-        self.lbl_prog_cj = ctk.CTkLabel(self.running_frame, text="抽奖进度: 0 / 0", font=ctk.CTkFont(size=16, weight="bold"))
-        self.lbl_prog_cj.pack(pady=2)
+        self.lbl_mini_task = ctk.CTkLabel(self.mini_info_frame, text="当前任务: 等待中", font=ctk.CTkFont(size=14, weight="bold"), text_color="#3498DB")
+        self.lbl_mini_task.pack(pady=(5, 2), anchor="w")
 
-        self.lbl_prog_sc = ctk.CTkLabel(self.running_frame, text="移除车辆进度: 0 / 0", font=ctk.CTkFont(size=16, weight="bold"))
-        self.lbl_prog_sc.pack(pady=2)
+        self.lbl_mini_prog = ctk.CTkLabel(self.mini_info_frame, text="任务进度: 0 / 0", font=ctk.CTkFont(size=13))
+        self.lbl_mini_prog.pack(pady=2, anchor="w")
 
-        self.lbl_run_loop = ctk.CTkLabel(
-            self.running_frame,
-            text="当前执行模块: 等待中...",
-            font=ctk.CTkFont(size=14),
-            text_color="#3498DB",
-        )
-        self.lbl_run_loop.pack(pady=(8, 6))
+        self.lbl_mini_loop = ctk.CTkLabel(self.mini_info_frame, text="大循环: 0 / 0", font=ctk.CTkFont(size=13))
+        self.lbl_mini_loop.pack(pady=2, anchor="w")
 
-        bottom_frame = ctk.CTkFrame(self, fg_color="transparent", height=200)
-        bottom_frame.pack(fill="both", expand=True, padx=18, pady=(6, 12))
+        # 3. 按钮区 (靠右排列)
+        self.btn_mini_stop = ctk.CTkButton(self.mini_frame, text="⏸ 停止 (F8)", fg_color="#DA3633", hover_color="#B02A37", width=90, font=ctk.CTkFont(weight="bold"), command=self.stop_all)
+        self.btn_mini_stop.pack(side="left", fill="y", padx=5, pady=10)
+
+        self.btn_mini_support = ctk.CTkButton(self.mini_frame, text="❤ 支持", fg_color="#F97316", hover_color="#EA580C", width=60, font=ctk.CTkFont(weight="bold"), command=self.open_support_window)
+        self.btn_mini_support.pack(side="left", fill="y", padx=(5, 10), pady=10)
+
+
+        self.bottom_frame = ctk.CTkFrame(self, fg_color="transparent", height=200)
+        self.bottom_frame.pack(fill="both", expand=True, padx=18, pady=(6, 12))
 
         self.btn_stop = ctk.CTkButton(
-            bottom_frame,
+            self.bottom_frame,
             text="⏸ 等待指令 (F8)",
             fg_color="#3A3A3A",
             hover_color="#4A4A4A",
@@ -733,7 +866,7 @@ class FH_UltimateBot(ctk.CTk):
         self.btn_stop.pack(side="left", padx=6)
 
         self.log_box = ctk.CTkTextbox(
-            bottom_frame,
+            self.bottom_frame,
             state="disabled",
             wrap="word",
             corner_radius=12,
@@ -886,14 +1019,27 @@ class FH_UltimateBot(ctk.CTk):
             hover_color="#238636",
             command=lambda: webbrowser.open("https://github.com/YOUSTHEONE/FH6Auto"),
         ).pack(side="left", padx=5)
+    def update_timer(self):
+        if not self.is_running:
+            return
+        elapsed = int(time.time() - self.start_time)
+        hrs = elapsed // 3600
+        mins = (elapsed % 3600) // 60
+        secs = elapsed % 60
+        time_str = f"总耗时: {hrs:02d}:{mins:02d}:{secs:02d}"
+        try:
+            self.lbl_mini_time.configure(text=time_str)
+        except Exception: pass
+        
+        if self.is_running:
+            self.after(1000, self.update_timer)
 
     def update_running_ui(self, task_name="", current_val=0, max_val=0):
         try:
-            self.ui_call(self.lbl_prog_race.configure, text=f"跑图进度: {self.race_counter} / {self.entry_race.get()}")
-            self.ui_call(self.lbl_prog_buy.configure, text=f"买车进度: {self.car_counter} / {self.entry_car.get()}")
-            self.ui_call(self.lbl_prog_cj.configure, text=f"抽奖进度: {self.cj_counter} / {self.entry_cj.get()}")
-            self.ui_call(self.lbl_prog_sc.configure, text=f"移除车辆进度: {self.sc_count} / {self.entry_sc.get()}")
-            self.ui_call(self.lbl_run_loop.configure, text=f"当前执行模块: 【{task_name}】")
+            if task_name:
+                self.ui_call(self.lbl_mini_task.configure, text=f"当前任务: {task_name}")
+            if max_val > 0:
+                self.ui_call(self.lbl_mini_prog.configure, text=f"执行进度: {current_val} / {max_val}")
         except Exception:
             pass
 
@@ -928,25 +1074,67 @@ class FH_UltimateBot(ctk.CTk):
         self.hw_key_down(key)
         time.sleep(delay)
         self.hw_key_up(key)
-
+    #副屏支持
+    def hw_mouse_move(self, x, y):
+        # 获取多显示器组成的整个“虚拟桌面”坐标和尺寸
+        SM_XVIRTUALSCREEN = 76
+        SM_YVIRTUALSCREEN = 77
+        SM_CXVIRTUALSCREEN = 78
+        SM_CYVIRTUALSCREEN = 79
+        left = ctypes.windll.user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        top = ctypes.windll.user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        width = ctypes.windll.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        height = ctypes.windll.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        if width == 0 or height == 0:
+            return
+        # 映射到 0~65535 的绝对虚拟坐标系统
+        calc_x = int((x - left) * 65535 / width)
+        calc_y = int((y - top) * 65535 / height)
+        # MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_ABSOLUTE = 0x8000, MOUSEEVENTF_VIRTUALDESK = 0x4000
+        flags = 0x0001 | 0x8000 | 0x4000 
+        extra = ctypes.c_ulong(0)
+        ii_ = Input_I()
+        ii_.mi = MouseInput(calc_x, calc_y, 0, flags, 0, ctypes.pointer(extra))
+        cmd = Input(ctypes.c_ulong(0), ii_)
+        SendInput(1, ctypes.pointer(cmd), ctypes.sizeof(cmd))
     def game_click(self, pos, double=False):
         if not self.is_running or not pos:
             return
-
-        pydirectinput.moveTo(int(pos[0]), int(pos[1]))
+        x, y = int(pos[0]), int(pos[1])
+        
+        # 使用多屏兼容的硬件级移动
+        self.hw_mouse_move(x, y)
         time.sleep(0.2)
-
         for _ in range(2 if double else 1):
             pydirectinput.mouseDown()
             time.sleep(0.1)
             pydirectinput.mouseUp()
             time.sleep(0.1)
-
         time.sleep(0.1)
-        pydirectinput.moveTo(10, 10)
-        pydirectinput.move(1, 1)
+        # 移开鼠标 10 像素，防止游戏里的悬浮提示框遮挡下一次截图
+        try:
+            gx, gy, gw, gh = self.regions["全界面"]
+            # 移动到游戏左上角向内偏移 5 个像素，确保在游戏内但绝对不会挡住任何中间UI
+            self.hw_mouse_move(gx + 5, gy + 5)
+        except Exception:
+            # 兜底：如果获取不到窗口坐标，移到绝对屏幕左上角
+            self.hw_mouse_move(5, 5)
         time.sleep(0.2)
 
+    def move_to_game_coord(self, x, y):
+        """
+        将鼠标移动到以【游戏窗口左上角】为起点的 (x, y) 坐标。
+        例如传入 (5, 5)，就会移动到游戏内左上角 5 像素的安全位置。
+        """
+        try:
+            gx, gy, gw, gh = self.regions["全界面"]
+            abs_x = gx + x
+            abs_y = gy + y
+            self.hw_mouse_move(abs_x, abs_y)
+        except Exception:
+            # 兜底：如果获取不到窗口坐标，就直接当绝对坐标移动
+            self.hw_mouse_move(x, y)
+    
     def add_skill_dir(self, direction):
         self.config["skill_dirs"].append(direction)
         self.update_skill_grid()
@@ -990,20 +1178,20 @@ class FH_UltimateBot(ctk.CTk):
 
         def write_ui():
             try:
+                # 写入下方大界面的日志
                 self.log_box.configure(state="normal")
                 self.log_box.insert("end", full_msg + "\n")
                 self.log_box.see("end")
                 self.log_box.configure(state="disabled")
+                # 同时写入迷你界面的横向日志
+                if hasattr(self, "mini_log_box"):
+                    self.mini_log_box.configure(state="normal")
+                    self.mini_log_box.insert("end", full_msg + "\n")
+                    self.mini_log_box.see("end")
+                    self.mini_log_box.configure(state="disabled")
             except Exception:
                 pass
-
         self.ui_call(write_ui)
-
-        try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(full_msg + "\n")
-        except Exception:
-            pass
 
    
     # ==========================================
@@ -1065,7 +1253,11 @@ class FH_UltimateBot(ctk.CTk):
 
             if hwnds:
                 hwnd = hwnds[0]
-                ctypes.windll.user32.ShowWindow(hwnd, 9)
+                if ctypes.windll.user32.IsIconic(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
+                else:
+                    ctypes.windll.user32.ShowWindow(hwnd, 5)
+                    
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
                 time.sleep(0.5)
                 # ====== 【新增】：强制关闭中文输入法 ======
@@ -1074,10 +1266,21 @@ class FH_UltimateBot(ctk.CTk):
                 try:
                     client_rect = win32gui.GetClientRect(hwnd)
                     pt = win32gui.ClientToScreen(hwnd, (0, 0))
-
                     x, y = pt[0], pt[1]
                     w, h = client_rect[2], client_rect[3]
                     self.update_regions_by_window(x, y, w, h)
+                    # ====== 【新增】：小窗口精准吸附游戏所在屏幕的右上角 ======
+                    def snap_to_game():
+                        if self.is_running:
+                            calc_w = int(w * 0.40)
+                            calc_h = int(h * 0.15)
+                            calc_w = max(calc_w, 650)
+                            calc_h = max(calc_h, 150)
+                            pos_x = x + w - calc_w - 20
+                            pos_y = y + 20
+                            self.geometry(f"{calc_w}x{calc_h}+{pos_x}+{pos_y}")
+                    self.ui_call(snap_to_game)
+                    # ==========================================
                 except Exception as e:
                     self.log(f"获取窗口坐标失败: {e}")
 
@@ -1391,7 +1594,19 @@ class FH_UltimateBot(ctk.CTk):
             self.load_template_file_cache()
 
     def capture_region(self, region=None):
-        screen = pyautogui.screenshot(region=region)
+        try:
+            if region:
+                x, y, w, h = region
+                # 将浮点数转换为整数，并计算右下角边界
+                bbox = (int(x), int(y), int(x + w), int(y + h))
+                # all_screens=True 允许跨越所有显示器截图
+                screen = ImageGrab.grab(bbox=bbox, all_screens=True)
+            else:
+                screen = ImageGrab.grab(all_screens=True)
+        except Exception:
+            # 兼容老版本 Pillow 的降级方案
+            screen = pyautogui.screenshot(region=region)
+            
         return cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
 
     def get_scales_to_try(self, fast_mode=True):
@@ -1995,21 +2210,39 @@ class FH_UltimateBot(ctk.CTk):
         self.is_running = True
         self.save_config()
 
+                # 隐藏大窗的所有元素
         self.config_frame.pack_forget()
-        self.global_settings_frame.pack_forget()  # 新增这行，运行中隐藏全局设置条
-        if hasattr(self, "res_frame"):
-            self.res_frame.pack_forget()
+        self.global_settings_frame.pack_forget()
+        self.top_container.pack_forget()
+        if hasattr(self, "bottom_frame"):
+            self.bottom_frame.pack_forget()
+        self.btn_support.pack_forget()
 
-        self.running_frame.pack(fill="x", expand=True, pady=(0, 5))
-        self.btn_stop.configure(text="停止运行 (F8)", fg_color="#DA3633", hover_color="#B02A37")
+        # 显示新的迷你横向 UI
+        self.mini_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        sw = self.winfo_screenwidth()
-        mini_w, mini_h = 500, 240
-        pos_x = sw - mini_w - 20
-        pos_y = 20
+        # ====== 计算 15% 高度 40% 宽度 ======
+        last_x, last_y, last_w, last_h = self.regions["全界面"]
+        if last_w <= 0: last_w = self.winfo_screenwidth()
+        if last_h <= 0: last_h = self.winfo_screenheight()
+
+        calc_w = int(last_w * 0.40)
+        calc_h = int(last_h * 0.15)
+        # 设置一个兜底最小值，防止分辨率过低时文字挤压导致崩溃
+        calc_w = max(calc_w, 650)
+        calc_h = max(calc_h, 150)
+
+        pos_x = last_x + last_w - calc_w - 20
+        pos_y = last_y + 20
+
         self.attributes("-topmost", True)
-        self.geometry(f"{mini_w}x{mini_h}+{pos_x}+{pos_y}")
+        self.geometry(f"{calc_w}x{calc_h}+{pos_x}+{pos_y}")
+        
+        # 启动计时器
+        self.start_time = time.time()
+        self.update_timer()
 
+        
         self.update_running_ui("初始化中...")
         self.race_counter = 0
         self.car_counter = 0
@@ -2030,7 +2263,8 @@ class FH_UltimateBot(ctk.CTk):
             except Exception:
                 total_loops = self.config.get("global_loops", 10)
             self.global_loop_current = 1
-            self.lbl_run_loop.configure(text=f"总大循环进度: {self.global_loop_current} / {total_loops}")
+            if hasattr(self, "lbl_mini_loop"):
+                self.ui_call(self.lbl_mini_loop.configure, text=f"大循环: {self.global_loop_current} / {total_loops}")
             while self.is_running:
                 step_name = steps[curr_idx]
                 success = False
@@ -2090,7 +2324,8 @@ class FH_UltimateBot(ctk.CTk):
                         
                     self.log(f"开启新一轮大循环 ({self.global_loop_current}/{total_loops})")
                     
-                    self.lbl_run_loop.configure(text=f"总大循环进度: {self.global_loop_current} / {total_loops}")
+                    if hasattr(self, "lbl_mini_loop"):
+                        self.ui_call(self.lbl_mini_loop.configure, text=f"大循环: {self.global_loop_current} / {total_loops}")
 
                     self.race_counter = 0
                     self.car_counter = 0
@@ -2122,11 +2357,16 @@ class FH_UltimateBot(ctk.CTk):
             pass
 
         def restore_ui():
-            self.running_frame.pack_forget()
+            if hasattr(self, "mini_frame"):
+                self.mini_frame.pack_forget()
+                
+            self.top_container.pack(fill="x", padx=18, pady=(18, 10))
             self.config_frame.pack(fill="x")
-            if hasattr(self, "res_frame"):
-                self.res_frame.pack(side="left", padx=6, before=self.log_box)
-            self.global_settings_frame.pack(fill="x", pady=(15, 0)) #停止后恢复全局设置条
+            self.global_settings_frame.pack(fill="x", pady=(15, 0))
+            if hasattr(self, "bottom_frame"):
+                self.bottom_frame.pack(fill="both", expand=True, padx=18, pady=(6, 12))
+            self.btn_support.pack(fill="x", padx=18, pady=(6, 12))
+            
             self.btn_stop.configure(text="等待指令 (F8)", fg_color="#3A3A3A", hover_color="#4A4A4A")
             self.attributes("-topmost", False)
             self.geometry("1800x800")
@@ -2610,7 +2850,7 @@ class FH_UltimateBot(ctk.CTk):
                     "newCC.png",
                     "newcartag.png",
                     region=self.regions["全界面"],
-                    threshold=0.76,     # 调低阈值包容标签遮挡
+                    threshold=0.85,     # 调低阈值包容标签遮挡
                     fast_mode=False     # 释放多重缩放火力
                 )
                 if pos_target:
@@ -2786,8 +3026,8 @@ class FH_UltimateBot(ctk.CTk):
         #驾驶收藏的车
         self.hw_press("enter")
         time.sleep(0.8)
-        pydirectinput.moveTo(10, 10)
-        pydirectinput.move(1, 1)
+        self.move_to_game_coord(5, 5)
+        time.sleep(0.2)
         pos = self.wait_for_image(
             "rc.png",
             region=self.regions["全界面"], # 【修改】：从中间改为全界面，防止漏搜
@@ -2835,8 +3075,7 @@ class FH_UltimateBot(ctk.CTk):
         self.hw_press("x")
         time.sleep(0.5)
         #鼠标复位
-        pydirectinput.moveTo(10, 10)
-        pydirectinput.move(1, 1)
+        self.move_to_game_coord(5, 5)
         #选择最近获得
         self.log("切换到 最近获得 的排序...")
         for _ in range(6):
