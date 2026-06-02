@@ -4,6 +4,7 @@ import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # =======================================
 import json
+import re
 import time
 import shutil
 import ctypes
@@ -90,12 +91,38 @@ LOG_FILE = os.path.join(APP_DIR, "bot_log.txt")
 CACHE_DIR = os.path.join(APP_DIR, "cache")
 TEMPLATE_CACHE_FILE = os.path.join(CACHE_DIR, "template_cache.pkl")
 TEMPLATE_META_FILE = os.path.join(CACHE_DIR, "template_meta.json")
-CURRENT_VERSION = "1.2.1"
+LOCAL_VERSION_FILE = os.path.join(APP_DIR, "version.json")
+DEFAULT_CURRENT_VERSION = "1.2.1"
 APP_DISPLAY_NAME = "FH6Auto Fork"
 APP_ATTRIBUTION = "Based on YOUSTHEONE/FH6Auto"
-UPSTREAM_REPO_URL = "https://github.com/YOUSTHEONE/FH6Auto"
-PROJECT_REPO_URL = "https://github.com/CaiSF25/FH6Auto-Fork"
-UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/CaiSF25/FH6Auto-Fork/refs/heads/main/version.json"
+DEFAULT_UPSTREAM_REPO_URL = "https://github.com/YOUSTHEONE/FH6Auto"
+DEFAULT_PROJECT_REPO_URL = "https://github.com/CaiSF25/FH6Auto-Fork"
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/CaiSF25/FH6Auto-Fork/refs/heads/main/version.json"
+
+
+def load_local_version_meta():
+    defaults = {
+        "version": DEFAULT_CURRENT_VERSION,
+        "project_url": DEFAULT_PROJECT_REPO_URL,
+        "upstream_url": DEFAULT_UPSTREAM_REPO_URL,
+        "manifest_url": DEFAULT_UPDATE_MANIFEST_URL,
+    }
+    try:
+        if os.path.exists(LOCAL_VERSION_FILE):
+            with open(LOCAL_VERSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                defaults.update({k: v for k, v in data.items() if v})
+    except Exception:
+        pass
+    return defaults
+
+
+LOCAL_VERSION_META = load_local_version_meta()
+CURRENT_VERSION = str(LOCAL_VERSION_META.get("version", DEFAULT_CURRENT_VERSION))
+UPSTREAM_REPO_URL = str(LOCAL_VERSION_META.get("upstream_url", DEFAULT_UPSTREAM_REPO_URL))
+PROJECT_REPO_URL = str(LOCAL_VERSION_META.get("project_url", DEFAULT_PROJECT_REPO_URL))
+UPDATE_MANIFEST_URL = str(LOCAL_VERSION_META.get("manifest_url", DEFAULT_UPDATE_MANIFEST_URL))
 def auto_extract_configs():
     os.makedirs(CONFIG_DIR, exist_ok=True)
     
@@ -179,9 +206,21 @@ def get_asset_path(*parts):
 
 def parse_version(v):
     try:
-        return tuple(int(x) for x in str(v).split("."))
+        parts = re.findall(r"\d+", str(v))
+        if not parts:
+            return (0, 0, 0)
+        nums = tuple(int(x) for x in parts[:4])
+        return nums + (0,) * (3 - len(nums)) if len(nums) < 3 else nums
     except Exception:
         return (0, 0, 0)
+
+
+def build_latest_release_api_url(repo_url):
+    m = re.match(r"^https://github\.com/([^/]+)/([^/]+?)/?$", str(repo_url).strip())
+    if not m:
+        return ""
+    owner, repo = m.groups()
+    return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
 
 # ==========================================
 # --- Ctypes 硬件级键盘模拟结构体定义 ---
@@ -1192,38 +1231,53 @@ class FH_UltimateBot(ctk.CTk):
         def check_update_logic():
             self.ui_call(self.lbl_version.configure, text="正在连接 Github...", text_color="#3498DB")
             try:
-                url = UPDATE_MANIFEST_URL
-                resp = requests.get(url, timeout=5)
+                remote_ver = "0.0.0"
+                remote_url = ""
+
+                # Prefer the lightweight manifest, but fall back to GitHub's
+                # latest release API so a forgotten version.json update does
+                # not silently hide a newer release.
+                manifest_url = UPDATE_MANIFEST_URL
+                resp = requests.get(manifest_url, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    remote_ver = data.get("version", "0.0.0")
-                    remote_url = data.get("url", "")
+                    remote_ver = str(data.get("version", "0.0.0"))
+                    remote_url = str(data.get("url", ""))
 
-                    if parse_version(remote_ver) > parse_version(CURRENT_VERSION):
-                        if remote_url.startswith("https://github.com/"):
-                            self.ui_call(
-                                self.lbl_version.configure,
-                                text=f"发现新版本 v{remote_ver}，已打开浏览器！",
-                                text_color="#2EA043",
-                            )
-                            webbrowser.open(remote_url)
-                        else:
-                            self.ui_call(
-                                self.lbl_version.configure,
-                                text="发现更新，但链接不可信，已拦截",
-                                text_color="#DA3633",
-                            )
+                release_api_url = build_latest_release_api_url(PROJECT_REPO_URL)
+                if release_api_url:
+                    api_resp = requests.get(
+                        release_api_url,
+                        timeout=5,
+                        headers={"Accept": "application/vnd.github+json"},
+                    )
+                    if api_resp.status_code == 200:
+                        release_data = api_resp.json()
+                        api_ver = str(release_data.get("tag_name", "")).strip()
+                        api_url = str(release_data.get("html_url", "")).strip()
+                        if parse_version(api_ver) > parse_version(remote_ver):
+                            remote_ver = api_ver
+                            remote_url = api_url
+
+                if parse_version(remote_ver) > parse_version(CURRENT_VERSION):
+                    if remote_url.startswith("https://github.com/"):
+                        self.ui_call(
+                            self.lbl_version.configure,
+                            text=f"发现新版本 v{remote_ver}，已打开浏览器！",
+                            text_color="#2EA043",
+                        )
+                        webbrowser.open(remote_url)
                     else:
                         self.ui_call(
                             self.lbl_version.configure,
-                            text=f"当前已是最新版本 (v{CURRENT_VERSION})",
-                            text_color="gray",
+                            text="发现更新，但链接不可信，已拦截",
+                            text_color="#DA3633",
                         )
                 else:
                     self.ui_call(
                         self.lbl_version.configure,
-                        text="检查更新失败 (服务器异常)",
-                        text_color="#DA3633",
+                        text=f"当前已是最新版本 (v{CURRENT_VERSION})",
+                        text_color="gray",
                     )
             except Exception:
                 self.ui_call(
