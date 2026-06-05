@@ -95,7 +95,8 @@ DEBUG_LOG_DIR = os.path.join(DEBUG_DIR, "logs")
 TEMPLATE_CACHE_FILE = os.path.join(CACHE_DIR, "template_cache.pkl")
 TEMPLATE_META_FILE = os.path.join(CACHE_DIR, "template_meta.json")
 LOCAL_VERSION_FILE = os.path.join(APP_DIR, "version.json")
-DEFAULT_CURRENT_VERSION = "1.2.3"
+OCR_MODELS_DIR = os.path.join(APP_DIR, "ocr_models")
+DEFAULT_CURRENT_VERSION = "1.2.4"
 APP_DISPLAY_NAME = "FH6Auto Fork"
 APP_ATTRIBUTION = "Based on YOUSTHEONE/FH6Auto"
 DEFAULT_UPSTREAM_REPO_URL = "https://github.com/YOUSTHEONE/FH6Auto"
@@ -1096,7 +1097,7 @@ class FH_UltimateBot(ctk.CTk):
             text_color="#60A5FA"
         ).pack(side="left", padx=(15, 18))
 
-        ctk.CTkLabel(self.delay_settings_frame, text="上车后等待:").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(self.delay_settings_frame, text="升级与调教动画时间:").pack(side="left", padx=(0, 6))
         self.lbl_post_get_in_car_value = ctk.CTkLabel(
             self.delay_settings_frame,
             text=self.format_delay_text(self.config.get("post_get_in_car_delay", 0.5)),
@@ -1520,6 +1521,22 @@ class FH_UltimateBot(ctk.CTk):
             # 兜底：如果获取不到窗口坐标，移到绝对屏幕左上角
             self.hw_mouse_move(5, 5)
         time.sleep(0.2)
+
+    def is_current_car_slot_position(self, pos):
+        if not pos:
+            return False
+
+        full_region = self.regions.get("全界面")
+        if not full_region:
+            return False
+
+        x, y, w, h = full_region
+        px, py = pos
+        rel_x = (px - x) / max(w, 1)
+        rel_y = (py - y) / max(h, 1)
+
+        # 当前选中车辆卡片通常位于屏幕偏左中部，右侧下一张车卡不应落入这个范围
+        return 0.22 <= rel_x <= 0.40 and 0.20 <= rel_y <= 0.52
 
     def move_to_game_coord(self, x, y):
         """
@@ -2104,7 +2121,7 @@ class FH_UltimateBot(ctk.CTk):
                         
                     self.log(f"正在进行全局恢复 (第 {continuous_failures}/{MAX_RECOVERIES} 次允许的重试)...")
                     
-                    if self.attempt_recovery():
+                    if self.attempt_recovery_v2():
                         continue # 恢复成功，回到 while 顶部再次尝试这个任务
                     else:
                         self.log("致命错误：连退回菜单/重启也失败了，彻底停止。")
@@ -2297,6 +2314,29 @@ class FH_UltimateBot(ctk.CTk):
             time.sleep(0.1)
 
     
+    def pause_for_manual_recovery(self, reason=""):
+        if not self.is_running:
+            return False
+
+        if reason:
+            self.log(reason, level="WARNING")
+        self.log("已自动暂停任务，请手动调整游戏状态；处理完成后点击继续(F9)以重新开始当前流程。", level="WARNING", step="等待人工处理")
+
+        if not self.is_paused:
+            self.toggle_pause()
+
+        while self.is_running and self.is_paused:
+            time.sleep(0.2)
+
+        if not self.is_running:
+            return False
+
+        self.log("检测到已点击继续，准备重新检查游戏状态并重试当前流程...", step="恢复重试")
+        if not self.check_and_focus_game():
+            self.log("继续后仍未能聚焦到游戏，请检查游戏是否仍在运行。", level="ERROR")
+            return False
+        return True
+
     def start_hotkey_listener(self):
         def hotkey_thread():
             def on_press(k):
@@ -2593,6 +2633,18 @@ class FH_UltimateBot(ctk.CTk):
                 # 杀进程后重新拉起
                 if not self.restart_game_and_boot():
                     return False
+        self.log("环境重置成功！即将从中断处继续剩余任务。")
+        return True
+
+    def attempt_recovery_v2(self):
+        self.log("任务执行异常中断，准备执行断点恢复流程...")
+        if not self.check_and_focus_game():
+            if not self.restart_game_and_boot():
+                return False
+        else:
+            if not self.advanced_enter_menu():
+                return self.pause_for_manual_recovery("高级动态退回失败，已改为自动暂停，不再强杀游戏。请手动调整游戏状态后点击继续。")
+
         self.log("环境重置成功！即将从中断处继续剩余任务。")
         return True
 
@@ -4881,7 +4933,8 @@ class FH_UltimateBot(ctk.CTk):
             self.hw_press("enter")
             time.sleep(0.2)
             self.hw_press("esc")
-            time.sleep(1.0)
+            self.log(f"退出车辆选择后额外等待 {self.get_post_get_in_car_delay():.2f}s，再查找升级与调教...")
+            self.sleep_post_get_in_car()
 
             pos_sjy = None
             for _ in range(20):
@@ -5147,32 +5200,96 @@ class FH_UltimateBot(ctk.CTk):
         self.hw_press("pagedown", delay=0.15)
         time.sleep(1.0)
 
-        self.hw_press("enter")  # 进入我的车辆
+        self.hw_press("enter")  # 筛选已收藏车
         time.sleep(2.0)
-        #选择一辆收藏
+        #??????
         self.hw_press("y") 
         time.sleep(1.0)
         self.hw_press("enter")
         time.sleep(0.8)
         self.hw_press("esc") 
         time.sleep(1.5)
-        #驾驶收藏的车
-        self.hw_press("enter")
-        time.sleep(0.8)
-        self.move_to_game_coord(5, 5)
-        time.sleep(0.2)
+        pos_skillcar = self.wait_for_image(
+            "skillcar-rm.png",
+            region=self.regions["全界面"],
+            threshold=0.75,
+            timeout=5,
+            interval=0.2,
+            fast_mode=True
+        )
+        if not pos_skillcar:
+            self.log("首次未找到 skillcar-rm，返回品牌列表重新定位 CCbrand 后再试一次...")
+            self.hw_press("backspace")
+            time.sleep(0.6)
 
-        pos = self.wait_for_image("rc.png", region=self.regions["全界面"], threshold=0.65, timeout=5, interval=0.2, fast_mode=True)
-        if pos:
-            self.log("找到上车，执行点击")
-            self.game_click(pos) # 【重要修复】：之前写的是 self.safe_click 导致直接报错崩溃，现已修正
-            time.sleep(2.0)
+            brand_pos_retry = None
+            for i in range(5):
+                if not self.is_running:
+                    return False
+
+                brand_pos_retry = self.wait_for_any_image_gray(
+                    ["CCbrand.png", "CCbrand-b.png"],
+                    region=self.regions["全界面"],
+                    threshold=0.72,
+                    timeout=0.8,
+                    interval=0.2,
+                    fast_mode=True
+                )
+                if brand_pos_retry:
+                    break
+
+                self.log(f"第 {i + 1} 次未识别到品牌，按 Up 后继续尝试...")
+                self.hw_press("up")
+                time.sleep(0.25)
+
+            if brand_pos_retry:
+                self.log("已重新定位到 CCbrand，点击后执行 Enter -> Enter -> Esc，再继续查找 skillcar-rm...")
+                self.game_click(brand_pos_retry)
+                time.sleep(0.8)
+                self.hw_press("enter")
+                time.sleep(0.8)
+                self.hw_press("enter")
+                time.sleep(0.8)
+                self.hw_press("esc")
+                time.sleep(1.0)
+                pos_skillcar = self.wait_for_image(
+                    "skillcar-rm.png",
+                    region=self.regions["全界面"],
+                    threshold=0.75,
+                    timeout=5,
+                    interval=0.2,
+                    fast_mode=True
+                )
+            else:
+                self.log("兜底流程中未找到 CCbrand。")
+
+        if pos_skillcar:
+            self.log("找到消耗品车辆，执行点击")
+            is_current_skillcar = self.is_current_car_slot_position(pos_skillcar)
+            self.log(f"skillcar-rm 命中坐标: {pos_skillcar} | {'当前乘坐车位' if is_current_skillcar else '非当前乘坐车位'}")
+            if is_current_skillcar:
+                self.log("命中当前乘坐的 skillcar-rm，直接按 ESC 返回并继续后续流程")
+                self.hw_press("esc")
+                time.sleep(1.5)
+            else:
+                self.game_click(pos_skillcar)
+                time.sleep(0.6)
+                self.log("命中非当前乘坐的 skillcar-rm，补一次 Enter 进入菜单")
+                self.hw_press("enter")
+                time.sleep(0.8)
+                pos = self.wait_for_image("rc.png", region=self.regions["全界面"], threshold=0.65, timeout=5, interval=0.2, fast_mode=True)
+                if pos:
+                    self.log("找到上车，执行Enter")
+                    self.hw_press("enter")
+                    time.sleep(2.0)
+                else:
+                    self.log("未找到上车，执行两次ESC")
+                    self.hw_press("esc")
+                    time.sleep(1.5)
+                    self.hw_press("esc")
+                    time.sleep(2.0)
         else:
-            self.log("该车辆已经驾驶，或未找到图片，执行两次ESC")
-            self.hw_press("esc")
-            time.sleep(1.5)
-            self.hw_press("esc")
-        time.sleep(2.0)
+            self.log("未找到消耗品车辆")
 
         found = False
         for i in range(30):
@@ -5210,31 +5327,9 @@ class FH_UltimateBot(ctk.CTk):
         #切换到消耗品品牌
         self.log("切换到消耗品品牌...")
         self.hw_press("backspace")
-        brand_pos = None
-        for _ in range(5):
-            if not self.is_running:
-                return False
-                
-
-            brand_pos = self.wait_for_any_image_gray(
-                ["CCbrand.png", "CCbrand-b.png"],
-                region=self.regions["全界面"],
-                threshold=0.75,
-                timeout=0.8,
-                interval=0.2,
-                fast_mode=True
-            )
-            if brand_pos:
-                break
-
-            self.hw_press("up")
-            time.sleep(0.25)
-
-        if not brand_pos:
-            self.log("未找到品牌")
-            return False
-
-        self.game_click(brand_pos)
+        time.sleep(1.2)
+        self.log("已进入制造商列表，直接按 Enter 确认当前品牌。")
+        self.hw_press("enter")
         time.sleep(0.8)
         
         self.log("开始删除最近获得的车辆！！！请人工确认是否移除")
@@ -5258,7 +5353,7 @@ class FH_UltimateBot(ctk.CTk):
             
             if not pos_target:
                 not_found_pages += 1
-                if not_found_pages >= 2:
+                if not_found_pages >= 8:
                     self.log("=连续翻找 2 页仍未搜索到目标车辆！视为车辆已全部清理完毕。")
                     self.log("主动结束清理任务，准备进入下一步骤...")
                     break  # 直接跳出循环，结束当前任务
