@@ -2050,6 +2050,7 @@ class FH_UltimateBot(ctk.CTk):
         self.car_counter = 0
         self.cj_counter = 0
         self.sc_count = 0
+        self.memory_car_page = 0
         self.global_loop_current = 0
         self.global_loop_total = 0
         self.current_phase_name = "启动任务"
@@ -3911,6 +3912,80 @@ class FH_UltimateBot(ctk.CTk):
 
         return True
 
+    def find_cj_consumable_car_with_memory(self, region=None):
+        """
+        在品牌车辆列表中搜索超级抽奖消耗品车，支持翻页记忆。
+
+        @param region 截图区域，默认全界面
+        @return 是否找到并点击目标车辆
+        """
+        region = region or self.regions["全界面"]
+        pos_target = None
+        found_car = False
+        start_page = max(0, min(84, int(getattr(self, "memory_car_page", 0))))
+
+        if start_page > 0:
+            self.log(f"沿用本轮记忆：直接从第 {start_page + 1} 页开始找车...")
+            if not self.fast_advance_car_pages(start_page, region=region):
+                return False
+
+        for page_idx in range(start_page, 85):
+            if not self.is_running:
+                return False
+
+            if page_idx > start_page:
+                self.log(f"第 {page_idx + 1} 页搜索前，等待翻页动画稳定...")
+                self.wait_for_region_stable(
+                    region=region,
+                    timeout=2.0,
+                    interval=0.15,
+                    diff_threshold=1.5,
+                    stable_hits=2
+                )
+
+            for confirm_idx in range(2):
+                if not self.is_running:
+                    return False
+
+                pos_target = self.wait_for_image_with_element_multi(
+                    "newCC.png",
+                    "newcartag.png",
+                    region=region,
+                    main_threshold=0.75,
+                    like_threshold=0.75,
+                    final_threshold=0.70,
+                    timeout=1.0,
+                    interval=0.2,
+                    fast_mode=True
+                )
+
+                if pos_target:
+                    self.game_click(pos_target)
+                    found_car = True
+                    self.memory_car_page = page_idx
+                    self.log(f"锁定目标车辆！当前可见页: {page_idx + 1}")
+                    break
+
+                if confirm_idx < 1:
+                    self.log(f"第 {page_idx + 1} 页第 {confirm_idx + 1} 次识别未命中，继续复查当前页...")
+                    time.sleep(0.25)
+
+            if found_car:
+                break
+
+            if page_idx >= 84:
+                break
+
+            self.log(f"第 {page_idx + 1} 页确认无目标车，翻到下一页继续搜索...")
+            self.hw_press("right", delay=0.08)
+            time.sleep(0.35)
+
+        if not found_car:
+            self.log("列表中未找到目标车辆，重置记忆页码。")
+            self.memory_car_page = 0
+
+        return found_car
+
     def find_race_skillcar_with_recheck(self, check_times=2, settle_delay=0.18):
         """
         Recheck the current visible car page a few times before deciding
@@ -4581,70 +4656,8 @@ class FH_UltimateBot(ctk.CTk):
 
             self.game_click(brand_pos)
             time.sleep(1.0)
-            pos_target = None
-            found_car = False
-            start_page = max(0, min(84, int(getattr(self, "memory_car_page", 0))))
 
-            if start_page > 0:
-                self.log(f"沿用本轮记忆：直接从第 {start_page + 1} 页开始找车...")
-                if not self.fast_advance_car_pages(start_page, region=self.regions["全界面"]):
-                    return False
-
-            # 一页一停、一页一判，确认当前可见页没有目标车后再翻到下一页。
-            for page_idx in range(start_page, 85):
-                if not self.is_running:
-                    return False
-
-                if page_idx > start_page:
-                    self.log(f"第 {page_idx + 1} 页搜索前，等待翻页动画稳定...")
-                    self.wait_for_region_stable(
-                        region=self.regions["全界面"],
-                        timeout=2.0,
-                        interval=0.15,
-                        diff_threshold=1.5,
-                        stable_hits=2
-                    )
-
-                for confirm_idx in range(2):
-                    if not self.is_running:
-                        return False
-
-                    pos_target = self.wait_for_image_with_element_multi(
-                        "newCC.png",
-                        "newcartag.png",
-                        region=self.regions["全界面"],
-                        main_threshold=0.75,   # 防HDR核心：第一道门槛放低
-                        like_threshold=0.75,
-                        final_threshold=0.70,
-                        timeout=1.0,
-                        interval=0.2,
-                        fast_mode=True
-                    )
-
-                    if pos_target:
-                        self.game_click(pos_target)
-                        found_car = True
-                        self.memory_car_page = page_idx
-                        self.log(f"锁定目标车辆！当前可见页: {page_idx + 1}")
-                        break
-
-                    if confirm_idx < 1:
-                        self.log(f"第 {page_idx + 1} 页第 {confirm_idx + 1} 次识别未命中，继续复查当前页...")
-                        time.sleep(0.25)
-
-                if found_car:
-                    break
-
-                if page_idx >= 84:
-                    break
-
-                self.log(f"第 {page_idx + 1} 页确认无目标车，翻到下一页继续搜索...")
-                self.hw_press("right", delay=0.08)
-                time.sleep(0.35)
-
-            if not found_car:
-                self.log("列表中未找到目标车辆，重置记忆页码。")
-                self.memory_car_page = 0 # 没找到说明车刷完了，清零记忆
+            if not self.find_cj_consumable_car_with_memory(region=self.regions["全界面"]):
                 return False
             self.sleep_ui(1.2)
             self.log("尝试寻找'上车'按钮...")
@@ -4865,69 +4878,7 @@ class FH_UltimateBot(ctk.CTk):
             self.game_click(brand_pos)
             time.sleep(1.0)
 
-            pos_target = None
-            found_car = False
-            start_page = max(0, min(84, int(getattr(self, "memory_car_page", 0))))
-
-            if start_page > 0:
-                self.log(f"沿用本轮记忆：直接从第 {start_page + 1} 页开始找车...")
-                if not self.fast_advance_car_pages(start_page, region=self.regions["全界面"]):
-                    return False
-
-            for page_idx in range(start_page, 85):
-                if not self.is_running:
-                    return False
-
-                if page_idx > start_page:
-                    self.log(f"第 {page_idx + 1} 页搜索前，等待翻页动画稳定...")
-                    self.wait_for_region_stable(
-                        region=self.regions["全界面"],
-                        timeout=2.0,
-                        interval=0.15,
-                        diff_threshold=1.5,
-                        stable_hits=2
-                    )
-
-                for confirm_idx in range(2):
-                    if not self.is_running:
-                        return False
-
-                    pos_target = self.wait_for_image_with_element_multi(
-                        "newCC.png",
-                        "newcartag.png",
-                        region=self.regions["全界面"],
-                        main_threshold=0.75,
-                        like_threshold=0.75,
-                        final_threshold=0.70,
-                        timeout=1.0,
-                        interval=0.2,
-                        fast_mode=True
-                    )
-
-                    if pos_target:
-                        self.game_click(pos_target)
-                        found_car = True
-                        self.memory_car_page = page_idx
-                        self.log(f"锁定目标车辆！当前可见页: {page_idx + 1}")
-                        break
-
-                    if confirm_idx < 1:
-                        self.log(f"第 {page_idx + 1} 页第 {confirm_idx + 1} 次识别未命中，继续复查当前页...")
-                        time.sleep(0.25)
-
-                if found_car:
-                    break
-
-                if page_idx >= 84:
-                    break
-
-                self.log(f"第 {page_idx + 1} 页确认无目标车，翻到下一页继续搜索...")
-                self.hw_press("right", delay=0.08)
-                time.sleep(0.35)
-
-            if not found_car:
-                self.log("列表中未找到目标车辆，重置记忆页码。")
-                self.memory_car_page = 0
+            if not self.find_cj_consumable_car_with_memory(region=self.regions["全界面"]):
                 return False
 
             self.hw_press("enter")
